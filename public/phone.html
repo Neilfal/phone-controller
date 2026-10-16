@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>Phone Controller</title>
+<style>
+  body { margin:0; font-family:system-ui,sans-serif; background:#111; color:#eee;
+         display:flex; flex-direction:column; align-items:center; justify-content:center;
+         min-height:100vh; gap:16px; padding:16px; box-sizing:border-box; text-align:center; }
+  #status { padding:6px 14px; border-radius:20px; font-weight:600; background:#a33; }
+  #status.ok { background:#2a7; }
+  #status.wait { background:#c80; }
+  button, input { font-size:18px; padding:14px 22px; border-radius:12px; border:0; }
+  button { background:#4a7cff; color:#fff; width:100%; max-width:320px; }
+  button.alt { background:#333; }
+  input { text-align:center; text-transform:uppercase; width:100%; max-width:320px; box-sizing:border-box; }
+  #live { font-family:monospace; font-size:14px; opacity:.8; }
+  .hidden { display:none; }
+</style>
+</head>
+<body>
+  <div id="status">Disconnected</div>
+
+  <div id="joinBox">
+    <input id="code" maxlength="4" placeholder="ROOM CODE" autocomplete="off">
+    <br><br>
+    <button id="joinBtn">Join</button>
+  </div>
+
+  <div id="ctrlBox" class="hidden">
+    <button id="calBtn">Calibrate (hold phone in neutral pose)</button><br><br>
+    <button id="jumpBtn" class="alt">JUMP</button>
+    <p id="live">tilt: 0, 0</p>
+    <p id="lat">latency: -- ms</p>
+  </div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const statusEl = $("status");
+
+let ws, room = "", joined = false, retry = 0, closedByUs = false;
+let raw = { gamma: 0, beta: 0 };      // latest sensor reading
+let cal = { gamma: 0, beta: 0 };      // neutral offset
+let smooth = { x: 0, y: 0 };          // low-pass filtered tilt
+let shake = false, lastShake = 0, sensorsOn = false;
+
+function setStatus(text, cls) { statusEl.textContent = text; statusEl.className = cls || ""; }
+
+// ---------- WebSocket with auto-reconnect ----------
+function connect() {
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  ws = new WebSocket(`${proto}://${location.host}/ws`);
+
+  ws.onopen = () => {
+    retry = 0;
+    ws.send(JSON.stringify({ type: "join", code: room })); // (re)join the same room
+  };
+
+  ws.onmessage = (e) => {
+    const m = JSON.parse(e.data);
+    if (m.type === "joined") {
+      joined = true;
+      $("joinBox").classList.add("hidden");
+      $("ctrlBox").classList.remove("hidden");
+      setStatus("Connected", "ok");
+    } else if (m.type === "peer") {
+      setStatus(m.connected ? "Connected" : "Waiting for laptop...", m.connected ? "ok" : "wait");
+    } else if (m.type === "error") {
+      if (m.reason === "room_full" && retry > 0) return; // old socket still closing; retry
+      setStatus("Error: " + m.reason, "");
+      if (m.reason === "no_such_room") { closedByUs = true; ws.close(); }
+    } else if (m.type === "pong") {
+      $("lat").textContent = "latency: " + Math.round(performance.now() - m.t) + " ms";
+    } else if (m.type === "vibrate" && navigator.vibrate) {
+      navigator.vibrate(m.ms || 50);
+    }
+  };
+
+  ws.onclose = () => {
+    joined = false;
+    if (closedByUs) return;
+    setStatus("Reconnecting...", "wait");
+    const delay = Math.min(1000 * 2 ** retry++, 8000); // exponential backoff, max 8s
+    setTimeout(connect, delay);
+  };
+}
+
+// ---------- Sensors ----------
+async function startSensors() {
+  if (sensorsOn) return true;
+  // iOS needs an explicit permission request, triggered by a tap
+  if (typeof DeviceOrientationEvent !== "undefined" &&
+      typeof DeviceOrientationEvent.requestPermission === "function") {
+    const r1 = await DeviceOrientationEvent.requestPermission();
+    const r2 = typeof DeviceMotionEvent.requestPermission === "function"
+      ? await DeviceMotionEvent.requestPermission() : "granted";
+    if (r1 !== "granted" || r2 !== "granted") { setStatus("Sensor permission denied", ""); return false; }
+  }
+  window.addEventListener("deviceorientation", (e) => {
+    raw.gamma = e.gamma || 0; // left/right tilt (-90..90)
+    raw.beta = e.beta || 0;   // front/back tilt (-180..180)
+  });
+  window.addEventListener("devicemotion", (e) => {
+    const a = e.acceleration || {};
+    const mag = Math.hypot(a.x || 0, a.y || 0, a.z || 0); // gravity removed
+    const now = performance.now();
+    if (mag > 15 && now - lastShake > 500) { shake = true; lastShake = now; }
+  });
+  sensorsOn = true;
+  return true;
+}
+
+function calibrate() { cal.gamma = raw.gamma; cal.beta = raw.beta; }
+
+// ---------- Send loop (~50 Hz) ----------
+setInterval(() => {
+  if (!joined || !ws || ws.readyState !== 1) return;
+  const x = raw.gamma - cal.gamma;
+  const y = raw.beta - cal.beta;
+  smooth.x += 0.4 * (x - smooth.x); // low-pass filter: smaller factor = smoother but laggier
+  smooth.y += 0.4 * (y - smooth.y);
+  ws.send(JSON.stringify({
+    type: "s",
+    x: +smooth.x.toFixed(1),
+    y: +smooth.y.toFixed(1),
+    shake,
+    t: Date.now()
+  }));
+  shake = false;
+  $("live").textContent = `tilt: ${smooth.x.toFixed(0)}, ${smooth.y.toFixed(0)}`;
+}, 20);
+
+// Latency probe every second
+setInterval(() => {
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: "ping", t: performance.now() }));
+}, 1000);
+
+// ---------- UI ----------
+$("joinBtn").onclick = async () => {
+  room = $("code").value.trim().toUpperCase();
+  if (room.length !== 4) return setStatus("Enter the 4-letter code", "");
+  if (!(await startSensors())) return;
+  setStatus("Connecting...", "wait");
+  closedByUs = false;
+  connect();
+  setTimeout(calibrate, 500); // first neutral pose
+};
+$("calBtn").onclick = calibrate;
+$("jumpBtn").onclick = () => { shake = true; }; // on-screen button doubles as jump (bonus)
+
+// Pre-fill the code if the QR code opened this page with ?room=XXXX
+const qs = new URLSearchParams(location.search).get("room");
+if (qs) $("code").value = qs.toUpperCase();
+</script>
+</body>
+</html>
