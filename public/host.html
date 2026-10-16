@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tilt Game (laptop)</title>
+<style>
+  body { margin:0; background:#111; color:#eee; font-family:system-ui,sans-serif;
+         display:flex; flex-direction:column; align-items:center; padding:12px; gap:10px; }
+  #bar { display:flex; gap:12px; align-items:center; flex-wrap:wrap; justify-content:center; }
+  .badge { padding:4px 12px; border-radius:16px; font-weight:600; background:#a33; }
+  .badge.ok { background:#2a7; }
+  .badge.wait { background:#c80; }
+  #wrap { position:relative; }
+  canvas { background:#1b1f2a; border-radius:12px; max-width:100%; }
+  #pair { position:absolute; inset:0; background:rgba(0,0,0,.85); border-radius:12px;
+          display:flex; flex-direction:column; align-items:center; justify-content:center; gap:8px; text-align:center; }
+  #pair.hidden { display:none; }
+  #code { font-size:48px; letter-spacing:10px; font-weight:700; }
+  #qr { background:#fff; padding:8px; border-radius:8px; width:200px; height:200px; }
+  small { opacity:.7; max-width:420px; }
+</style>
+</head>
+<body>
+  <div id="bar">
+    <span id="conn" class="badge">Server: disconnected</span>
+    <span id="phone" class="badge">Phone: not paired</span>
+    <span id="lat">latency: -- ms</span>
+    <span id="score">Score: 0</span>
+  </div>
+
+  <div id="wrap">
+    <canvas id="c" width="800" height="500"></canvas>
+    <div id="pair">
+      <div>Scan with your phone, or open the link and type the code</div>
+      <img id="qr" alt="QR code">
+      <div id="code">----</div>
+      <small id="link"></small>
+    </div>
+  </div>
+  <small>Tilt to roll the ball into the yellow stars. Shake (or tap JUMP) to hop over the red pits.</small>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const canvas = $("c"), ctx = canvas.getContext("2d");
+const W = canvas.width, H = canvas.height;
+
+// ---------------- Networking ----------------
+let ws, retry = 0, room = sessionStorage.getItem("room") || "";
+let phoneConnected = false;
+const input = { x: 0, y: 0 }; // latest tilt from phone (degrees)
+let jumpRequested = false;
+
+function setBadge(el, text, cls) { el.textContent = text; el.className = "badge " + (cls || ""); }
+
+function connect() {
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  ws = new WebSocket(`${proto}://${location.host}/ws`);
+
+  ws.onopen = () => {
+    retry = 0;
+    setBadge($("conn"), "Server: connected", "ok");
+    // Try to resume the old room first, otherwise make a new one
+    ws.send(JSON.stringify(room ? { type: "resume", code: room } : { type: "create" }));
+  };
+
+  ws.onmessage = (e) => {
+    const m = JSON.parse(e.data);
+    if (m.type === "s") {            // sensor packet from the phone
+      input.x = m.x; input.y = m.y;
+      if (m.shake) jumpRequested = true;
+    } else if (m.type === "created") {
+      room = m.code;
+      sessionStorage.setItem("room", room);
+      showPairing();
+    } else if (m.type === "peer") {
+      phoneConnected = m.connected;
+      setBadge($("phone"), m.connected ? "Phone: connected" : "Phone: disconnected", m.connected ? "ok" : "wait");
+      $("pair").classList.toggle("hidden", m.connected);
+    } else if (m.type === "error" && m.reason === "room_expired") {
+      room = ""; sessionStorage.removeItem("room");
+      ws.send(JSON.stringify({ type: "create" })); // old room is gone, start fresh
+    } else if (m.type === "pong") {
+      $("lat").textContent = "latency: " + Math.round(performance.now() - m.t) + " ms";
+    }
+  };
+
+  ws.onclose = () => {
+    setBadge($("conn"), "Server: reconnecting...", "wait");
+    phoneConnected = false;
+    const delay = Math.min(1000 * 2 ** retry++, 8000); // exponential backoff
+    setTimeout(connect, delay);
+  };
+}
+
+function showPairing() {
+  const url = `${location.origin}/phone.html?room=${room}`;
+  $("code").textContent = room;
+  $("link").textContent = url;
+  $("qr").src = "/qr?text=" + encodeURIComponent(url);
+  if (!phoneConnected) $("pair").classList.remove("hidden");
+}
+
+const vibrate = (ms) => ws && ws.readyState === 1 && ws.send(JSON.stringify({ type: "vibrate", ms }));
+
+setInterval(() => { // latency probe (laptop <-> server round trip)
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: "ping", t: performance.now() }));
+}, 1000);
+
+// Keyboard fallback so you can test the game without a phone
+const keys = {};
+addEventListener("keydown", (e) => { keys[e.key] = true; if (e.key === " ") jumpRequested = true; });
+addEventListener("keyup", (e) => { keys[e.key] = false; });
+
+// ---------------- Game ----------------
+const ball = { x: W / 2, y: H / 2, vx: 0, vy: 0, r: 14 };
+let jumpT = 0, score = 0;
+const pits = [{ x: 200, y: 150, r: 40 }, { x: 600, y: 330, r: 45 }, { x: 400, y: 400, r: 35 }];
+let star = randomStar();
+
+function randomStar() {
+  return { x: 40 + Math.random() * (W - 80), y: 40 + Math.random() * (H - 80), r: 12 };
+}
+const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+
+function update(dt) {
+  // Tilt (degrees) -> acceleration. Dead zone ignores tiny wobbles.
+  let tx = input.x, ty = input.y;
+  if (keys.ArrowLeft) tx = -25; if (keys.ArrowRight) tx = 25;
+  if (keys.ArrowUp) ty = -25;   if (keys.ArrowDown) ty = 25;
+  const dz = (v) => (Math.abs(v) < 2 ? 0 : v);
+  const ax = Math.max(-1, Math.min(1, dz(tx) / 25)) * 1800;
+  const ay = Math.max(-1, Math.min(1, dz(ty) / 25)) * 1800;
+
+  // Strong, frame-rate independent drag so the ball reacts quickly and stops quickly
+  const drag = Math.pow(0.02, dt);
+  ball.vx = (ball.vx + ax * dt) * drag;
+  ball.vy = (ball.vy + ay * dt) * drag;
+  ball.x += ball.vx * dt;
+  ball.y += ball.vy * dt;
+
+  // Bounce off walls
+  if (ball.x < ball.r) { ball.x = ball.r; ball.vx *= -0.5; }
+  if (ball.x > W - ball.r) { ball.x = W - ball.r; ball.vx *= -0.5; }
+  if (ball.y < ball.r) { ball.y = ball.r; ball.vy *= -0.5; }
+  if (ball.y > H - ball.r) { ball.y = H - ball.r; ball.vy *= -0.5; }
+
+  // Jump (shake)
+  if (jumpRequested && jumpT <= 0) { jumpT = 0.6; vibrate(30); }
+  jumpRequested = false;
+  if (jumpT > 0) jumpT -= dt;
+
+  // Star collected
+  if (dist(ball, star) < ball.r + star.r) {
+    score++; star = randomStar(); vibrate(40);
+    $("score").textContent = "Score: " + score;
+  }
+  // Fell in a pit (unless jumping)
+  if (jumpT <= 0) {
+    for (const p of pits) {
+      if (dist(ball, p) < p.r - 4) {
+        ball.x = W / 2; ball.y = H / 2; ball.vx = ball.vy = 0;
+        score = Math.max(0, score - 1);
+        $("score").textContent = "Score: " + score;
+        vibrate(200);
+      }
+    }
+  }
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = "#7a1f2b";
+  for (const p of pits) { ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, 7); ctx.fill(); }
+  ctx.fillStyle = "#ffd23f";
+  ctx.beginPath(); ctx.arc(star.x, star.y, star.r, 0, 7); ctx.fill();
+
+  const lift = jumpT > 0 ? Math.sin((jumpT / 0.6) * Math.PI) : 0; // 0..1..0 during a jump
+  ctx.fillStyle = "rgba(0,0,0,.4)"; // shadow stays on the ground
+  ctx.beginPath(); ctx.arc(ball.x, ball.y + 4, ball.r, 0, 7); ctx.fill();
+  ctx.fillStyle = "#4a7cff";
+  ctx.beginPath(); ctx.arc(ball.x, ball.y - lift * 30, ball.r * (1 + lift * 0.4), 0, 7); ctx.fill();
+}
+
+let last = performance.now();
+function loop(now) {
+  const dt = Math.min(0.05, (now - last) / 1000);
+  last = now;
+  update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+
+connect();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

@@ -17,6 +17,12 @@
   input { text-align:center; text-transform:uppercase; width:100%; max-width:320px; box-sizing:border-box; }
   #live { font-family:monospace; font-size:14px; opacity:.8; }
   .hidden { display:none; }
+  #jumpBtn { padding:26px 40px; }
+  @media (orientation: landscape) {
+    body { gap:8px; padding:8px; }
+    #live, #lat { margin:4px; }
+    #ctrlBox button { max-width:none; }
+  }
 </style>
 </head>
 <body>
@@ -41,7 +47,7 @@ const statusEl = $("status");
 
 let ws, room = "", joined = false, retry = 0, closedByUs = false;
 let raw = { gamma: 0, beta: 0 };      // latest sensor reading
-let cal = { gamma: 0, beta: 0 };      // neutral offset
+let cal = { x: 0, y: 0 };             // neutral offset (screen-space tilt)
 let smooth = { x: 0, y: 0 };          // low-pass filtered tilt
 let shake = false, lastShake = 0, sensorsOn = false;
 
@@ -111,15 +117,33 @@ async function startSensors() {
   return true;
 }
 
-function calibrate() { cal.gamma = raw.gamma; cal.beta = raw.beta; }
+// Which way is the phone rotated? 0 = portrait, 90/270 = landscape, 180 = upside-down
+function screenAngle() {
+  const a = (screen.orientation && screen.orientation.angle) ?? window.orientation ?? 0;
+  return ((a % 360) + 360) % 360;
+}
+// Turn raw gamma/beta into "tilt as seen on the phone's screen" for the current rotation
+function screenTilt() {
+  switch (screenAngle()) {
+    case 90:  return { x: raw.beta,   y: -raw.gamma };
+    case 270: return { x: -raw.beta,  y: raw.gamma };
+    case 180: return { x: -raw.gamma, y: -raw.beta };
+    default:  return { x: raw.gamma,  y: raw.beta };
+  }
+}
+function calibrate() { const t = screenTilt(); cal.x = t.x; cal.y = t.y; }
+// Re-calibrate automatically after the phone is rotated
+window.addEventListener("orientationchange", () => setTimeout(calibrate, 400));
+if (screen.orientation) screen.orientation.addEventListener("change", () => setTimeout(calibrate, 400));
 
 // ---------- Send loop (~50 Hz) ----------
 setInterval(() => {
   if (!joined || !ws || ws.readyState !== 1) return;
-  const x = raw.gamma - cal.gamma;
-  const y = raw.beta - cal.beta;
-  smooth.x += 0.4 * (x - smooth.x); // low-pass filter: smaller factor = smoother but laggier
-  smooth.y += 0.4 * (y - smooth.y);
+  const t = screenTilt();
+  const x = t.x - cal.x;
+  const y = t.y - cal.y;
+  smooth.x += 0.65 * (x - smooth.x); // low-pass filter: bigger factor = snappier but jittery
+  smooth.y += 0.65 * (y - smooth.y);
   ws.send(JSON.stringify({
     type: "s",
     x: +smooth.x.toFixed(1),
@@ -129,7 +153,7 @@ setInterval(() => {
   }));
   shake = false;
   $("live").textContent = `tilt: ${smooth.x.toFixed(0)}, ${smooth.y.toFixed(0)}`;
-}, 20);
+}, 16); // ~60 Hz
 
 // Latency probe every second
 setInterval(() => {
@@ -141,13 +165,17 @@ $("joinBtn").onclick = async () => {
   room = $("code").value.trim().toUpperCase();
   if (room.length !== 4) return setStatus("Enter the 4-letter code", "");
   if (!(await startSensors())) return;
+  try {
+    await document.documentElement.requestFullscreen();
+    await screen.orientation.lock("landscape");
+  } catch (e) { /* not supported (e.g. iOS): just rotate the phone manually */ }
   setStatus("Connecting...", "wait");
   closedByUs = false;
   connect();
   setTimeout(calibrate, 500); // first neutral pose
 };
 $("calBtn").onclick = calibrate;
-$("jumpBtn").onclick = () => { shake = true; }; // on-screen button doubles as jump (bonus)
+$("jumpBtn").onpointerdown = () => { shake = true; }; // on-screen button doubles as jump (bonus)
 
 // Pre-fill the code if the QR code opened this page with ?room=XXXX
 const qs = new URLSearchParams(location.search).get("room");

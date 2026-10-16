@@ -21,6 +21,7 @@ const GRACE_MS = 30000; // keep a room alive this long after the host drops
 
 const app = express();
 app.use(express.static(path.join(__dirname, "public")));
+app.get("/", (req, res) => res.redirect("/host.html"));
 
 // /qr?text=... -> PNG QR code (so the laptop page needs no extra libraries)
 app.get("/qr", async (req, res) => {
@@ -64,6 +65,13 @@ wss.on("connection", (ws) => {
     if (msg.type === "s") {
       const room = rooms.get(ws.room);
       if (room && ws.role === "phone") send(room.host, msg);
+      return;
+    }
+
+    // Host -> phone: vibration feedback
+    if (msg.type === "vibrate") {
+      const room = rooms.get(ws.room);
+      if (room && ws.role === "host") send(room.phone, msg);
       return;
     }
 
