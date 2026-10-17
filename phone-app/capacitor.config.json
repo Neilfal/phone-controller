@@ -1,0 +1,9 @@
+{
+  "appId": "com.tiltcontroller.app",
+  "appName": "Tilt Controller",
+  "webDir": "www",
+  "server": {
+    "url": "https://phone-controller-spkv.onrender.com/phone.html",
+    "cleartext": false
+  }
+}

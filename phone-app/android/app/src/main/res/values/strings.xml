@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Tilt Controller</string>
+    <string name="title_activity_main">Tilt Controller</string>
+    <string name="package_name">com.tiltcontroller.app</string>
+    <string name="custom_url_scheme">com.tiltcontroller.app</string>
+</resources>
