@@ -2,9 +2,9 @@
 
 Turn your phone into a real-time motion controller for a browser game on your laptop. Tilt the phone to roll the ball, shake it to jump.
 
-- **Live game (laptop):** `https://YOUR-APP.onrender.com/host.html`
+- **Live game (laptop):** `https://phone-controller-spkv.onrender.com/host.html`
 - **Android APK:** [`releases/app-debug.apk`](releases/app-debug.apk) (or the GitHub Releases page)
-- **Demo video:** `ADD-LINK-HERE`
+- **Demo video:** ` `
 
 ---
 
