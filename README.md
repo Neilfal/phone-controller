@@ -4,7 +4,7 @@ Turn your phone into a real-time motion controller for a browser game on your la
 
 - **Live game (laptop):** `https://phone-controller-spkv.onrender.com/host.html`
 - **Android APK:** [`releases/app-debug.apk`](releases/app-debug.apk) (or the GitHub Releases page)
-- **Demo video:** ` `
+- **Demo video:** `https://drive.google.com/file/d/1MdV_ZOOXhp1blv8OBUqp0PlOlAk2CLd3/view?usp=drivesdk`
 
 ---
 
